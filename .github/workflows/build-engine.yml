@@ -38,25 +38,26 @@ jobs:
 
           npx cap add android
 
-      - name: 锻造专属 App 图标
+      - name: 锻造专属 App 图标 (ImageMagick 暴力重绘)
         run: |
           npm install -g @capacitor/assets
+          sudo apt-get install -y imagemagick
           mkdir -p assets
           
           if [ -n "${{ github.event.client_payload.icon_base64 }}" ]; then
-            echo "${{ github.event.client_payload.icon_base64 }}" | base64 -d > assets/icon.png
+            echo "${{ github.event.client_payload.icon_base64 }}" | base64 -d > assets/icon_raw
           elif [ -n "${{ github.event.client_payload.icon_url }}" ]; then
-            wget -q -O assets/icon.png "${{ github.event.client_payload.icon_url }}"
+            curl -L -q "${{ github.event.client_payload.icon_url }}" -o assets/icon_raw
           else
-            wget -q -O assets/icon.png "https://img.icons8.com/fluency/512/android-os.png"
+            curl -L -q "https://img.icons8.com/fluency/512/android-os.png" -o assets/icon_raw
           fi
           
-          # 补充 Splash 避免工具报错
+          # 核心防线：强行洗帧转换成标准无透明通道的 PNG，粉碎一切图标报错
+          convert assets/icon_raw -resize 512x512 assets/icon.png
           cp assets/icon.png assets/splash.png
-          
           npx @capacitor/assets generate --android
 
-      - name: 终极底层手术 (注入广告拦截、悬浮球、返回键修复)
+      - name: 终极底层手术 (动态注入全引擎)
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
@@ -65,53 +66,115 @@ jobs:
 
           payload = json.loads(os.environ['PAYLOAD'])
 
-          # 1. 组装 Native Alpha 广告规则
-          ad_domains = []
+          # --- 1. 升级版 Adblock 规则引擎 ---
+          ad_domains = set()
           ad_rules = payload.get('ad_rules', '')
           if ad_rules:
               for url in ad_rules.split(','):
                   if not url.strip(): continue
                   try:
                       req = urllib.request.Request(url.strip(), headers={'User-Agent': 'Mozilla/5.0'})
-                      lines = urllib.request.urlopen(req, timeout=10).read().decode('utf-8').split('\n')
+                      lines = urllib.request.urlopen(req, timeout=10).read().decode('utf-8').splitlines()
                       for line in lines:
-                          if line.startswith('||') and '^' in line:
+                          line = line.strip()
+                          if not line or line.startswith('#') or line.startswith('!'): continue
+                          if line.startswith('0.0.0.0 ') or line.startswith('127.0.0.1 '):
+                              parts = line.split()
+                              if len(parts) >= 2: ad_domains.add(f'"{parts[1]}"')
+                          elif line.startswith('||') and '^' in line:
                               domain = line[2:line.find('^')]
-                              ad_domains.append(f'"{domain}"')
+                              ad_domains.add(f'"{domain}"')
+                          elif '.' in line and ' ' not in line and '/' not in line:
+                              ad_domains.add(f'"{line}"')
                   except Exception as e:
                       print('规则下载失败:', e)
-          ad_domains = ad_domains[:2000] # 限制数量防止内存溢出
-          ad_array_str = ','.join(ad_domains)
+          ad_array_str = ','.join(list(ad_domains)[:4000])
 
-          # 2. 构建悬浮球 JavaScript
+          # --- 2. 悬浮球与毛玻璃 UI (纯 JS 构建) ---
           float_js = """
           (function(){
               if(document.getElementById('reality-fab')) return;
+
+              /* 毛玻璃退出对话框 */
+              var dialogOverlay = document.createElement('div');
+              dialogOverlay.style.cssText = 'display:none;position:fixed;top:0;left:0;width:100vw;height:100vh;background:rgba(0,0,0,0.5);backdrop-filter:blur(15px);-webkit-backdrop-filter:blur(15px);z-index:9999999;align-items:center;justify-content:center;opacity:0;transition:opacity 0.3s ease;';
+              dialogOverlay.innerHTML = '<div style="background:rgba(255,255,255,0.15);border:1px solid rgba(255,255,255,0.3);padding:30px;border-radius:20px;text-align:center;box-shadow:0 10px 30px rgba(0,0,0,0.5);color:white;font-family:sans-serif;width:80%;max-width:300px;"><h2 style="margin:0 0 15px 0;font-size:20px;">退出应用</h2><p style="margin:0 0 25px 0;font-size:14px;opacity:0.8;">您确定要退出吗？</p><div style="display:flex;gap:15px;"><button id="btn-cancel-exit" style="flex:1;padding:12px;border:none;border-radius:10px;background:rgba(255,255,255,0.1);color:white;font-size:15px;cursor:pointer;">取消</button><button id="btn-confirm-exit" style="flex:1;padding:12px;border:none;border-radius:10px;background:#c0392b;color:white;font-size:15px;cursor:pointer;">退出</button></div></div>';
+              document.body.appendChild(dialogOverlay);
+
+              window.RealityApp = {
+                  showExitDialog: function() {
+                      dialogOverlay.style.display = 'flex';
+                      setTimeout(function(){ dialogOverlay.style.opacity = '1'; }, 10);
+                  },
+                  hideExitDialog: function() {
+                      dialogOverlay.style.opacity = '0';
+                      setTimeout(function(){ dialogOverlay.style.display = 'none'; }, 300);
+                  }
+              };
+              document.getElementById('btn-cancel-exit').onclick = window.RealityApp.hideExitDialog;
+              document.getElementById('btn-confirm-exit').onclick = function() { AndroidNative.exitApp(); };
+
+              /* 悬浮球本体 */
               var fab = document.createElement('div');
               fab.id = 'reality-fab';
-              fab.innerHTML = '⚙️';
-              fab.style.cssText = 'position:fixed;bottom:80px;right:20px;width:50px;height:50px;background:rgba(0,0,0,0.7);color:#fff;border-radius:25px;text-align:center;line-height:50px;font-size:24px;z-index:999999;box-shadow:0 4px 10px rgba(0,0,0,0.3);cursor:pointer;backdrop-filter:blur(5px);';
+              var fabIconUrl = '__FLOAT_ICON_URL__';
+              var fabBase64 = '__FLOAT_ICON_BASE64__';
+              if(fabBase64) { fab.innerHTML = '<img src="data:image/png;base64,' + fabBase64 + '" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">'; }
+              else if(fabIconUrl) { fab.innerHTML = '<img src="' + fabIconUrl + '" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">'; }
+              else { fab.innerHTML = '⚙️'; }
+              
+              fab.style.cssText = 'position:fixed;bottom:50px;right:20px;width:50px;height:50px;background:rgba(255,255,255,0.2);color:#fff;border-radius:25px;text-align:center;line-height:50px;font-size:24px;z-index:999998;box-shadow:0 4px 15px rgba(0,0,0,0.3);cursor:pointer;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;overflow:hidden;';
               document.body.appendChild(fab);
-              
+
+              /* 悬浮菜单 */
               var menu = document.createElement('div');
-              menu.style.cssText = 'display:none;position:fixed;bottom:140px;right:20px;background:rgba(0,0,0,0.8);border-radius:10px;padding:10px;z-index:999998;color:white;flex-direction:column;gap:10px;backdrop-filter:blur(5px);';
-              menu.innerHTML = '<div id="fab-dark" style="padding:8px 15px;background:#333;border-radius:5px;text-align:center;cursor:pointer;">🌙 黑暗模式</div>' + 
-                               '<div id="fab-exit" style="padding:8px 15px;background:#c0392b;border-radius:5px;text-align:center;cursor:pointer;">❌ 退出应用</div>';
+              menu.style.cssText = 'display:none;position:fixed;bottom:110px;right:20px;background:rgba(0,0,0,0.7);border-radius:15px;padding:10px;z-index:999997;color:white;flex-direction:column;gap:10px;backdrop-filter:blur(15px);transform:scale(0.9);opacity:0;transition:all 0.2s;';
+              
+              var mHTML = '';
+              mHTML += '<div id="fab-home" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🏠 返回首页</div>';
+              if('__FLOAT_TRANS__' === 'True') mHTML += '<div id="fab-trans" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🌐 网页翻译</div>';
+              if('__FLOAT_DARK__' === 'True') mHTML += '<div id="fab-dark" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🌙 黑暗模式</div>';
+              
+              var cMenus = __CUSTOM_MENUS__;
+              cMenus.forEach(function(item, idx) {
+                  mHTML += '<div id="fab-custom-'+idx+'" data-url="'+item.url+'" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🔗 '+item.label+'</div>';
+              });
+              
+              if('__FLOAT_EXIT__' === 'True') mHTML += '<div id="fab-exit" style="padding:10px 15px;background:rgba(231,76,60,0.3);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;color:#ff7675;">❌ 退出应用</div>';
+              
+              menu.innerHTML = mHTML;
               document.body.appendChild(menu);
-              
-              fab.onclick = function() { menu.style.display = menu.style.display === 'none' ? 'flex' : 'none'; };
-              
-              document.getElementById('fab-dark').onclick = function() {
-                  document.documentElement.style.filter = document.documentElement.style.filter ? '' : 'invert(1) hue-rotate(180deg)';
-                  menu.style.display = 'none';
+
+              fab.onclick = function() {
+                  if(menu.style.display === 'none') {
+                      menu.style.display = 'flex'; setTimeout(function(){ menu.style.transform='scale(1)'; menu.style.opacity='1'; },10);
+                  } else {
+                      menu.style.transform='scale(0.9)'; menu.style.opacity='0'; setTimeout(function(){ menu.style.display='none'; },200);
+                  }
               };
-              document.getElementById('fab-exit').onclick = function() { AndroidNative.exitApp(); };
+
+              if(document.getElementById('fab-home')) document.getElementById('fab-home').onclick = function() { window.location.href = '__HOME_URL__' || '__TARGET_URL__'; };
+              if(document.getElementById('fab-trans')) document.getElementById('fab-trans').onclick = function() { window.location.href = "https://translate.google.com/translate?sl=auto&tl=zh-CN&u=" + encodeURIComponent(window.location.href); };
+              if(document.getElementById('fab-dark')) document.getElementById('fab-dark').onclick = function() { document.documentElement.style.filter = document.documentElement.style.filter ? '' : 'invert(1) hue-rotate(180deg)'; };
+              cMenus.forEach(function(item, idx) {
+                  var el = document.getElementById('fab-custom-'+idx);
+                  if(el) el.onclick = function() { window.location.href = this.getAttribute('data-url'); };
+              });
+              if(document.getElementById('fab-exit')) document.getElementById('fab-exit').onclick = function() { menu.style.display='none'; window.RealityApp.showExitDialog(); };
           })();
           """
+          float_js = float_js.replace('__FLOAT_ICON_URL__', payload.get('float_icon_url', ''))
+          float_js = float_js.replace('__FLOAT_ICON_BASE64__', payload.get('float_icon_base64', ''))
+          float_js = float_js.replace('__FLOAT_TRANS__', str(payload.get('float_translate', True)))
+          float_js = float_js.replace('__FLOAT_DARK__', str(payload.get('float_darkmode', True)))
+          float_js = float_js.replace('__FLOAT_EXIT__', str(payload.get('float_exit', True)))
+          float_js = float_js.replace('__HOME_URL__', payload.get('float_home_url', ''))
+          float_js = float_js.replace('__TARGET_URL__', payload.get('target_url', ''))
+          float_js = float_js.replace('__CUSTOM_MENUS__', json.dumps(payload.get('custom_menus', [])))
           float_js_b64 = base64.b64encode(float_js.encode('utf-8')).decode('utf-8')
 
-          # 3. 生成并替换安卓底层 MainActivity.java
-          java_code = f"""
+          # --- 3. 安卓底层核心注入 ---
+          java_code = """
           package com.reality.app;
           import android.os.Bundle;
           import android.webkit.WebView;
@@ -124,53 +187,68 @@ jobs:
           import android.util.Base64;
           import android.webkit.JavascriptInterface;
 
-          public class MainActivity extends BridgeActivity {{
-              private static final List<String> AD_DOMAINS = Arrays.asList({ad_array_str});
+          public class MainActivity extends BridgeActivity {
+              private static final List<String> AD_DOMAINS = Arrays.asList(__AD_DOMAINS__);
+              private long lastBackPressTime = 0;
 
               @Override
-              public void onCreate(Bundle savedInstanceState) {{
+              public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
-                  WebView webView = this.bridge.getWebView();
                   
-                  // 提供 JS 退出原生 App 的桥梁
-                  webView.addJavascriptInterface(new Object() {{
-                      @JavascriptInterface
-                      public void exitApp() {{ finish(); }}
-                  }}, "AndroidNative");
+                  // 核心修复 2：状态栏重叠处理
+                  if (__FULLSCREEN__) {
+                      getWindow().setFlags(1024, 1024); // FLAG_FULLSCREEN
+                  } else {
+                      androidx.core.view.WindowCompat.setDecorFitsSystemWindows(getWindow(), true); // 防止沉浸式霸占状态栏
+                  }
 
-                  webView.setWebViewClient(new BridgeWebViewClient(this.bridge) {{
-                      @Override
-                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {{
-                          String url = request.getUrl().toString();
-                          for (String domain : AD_DOMAINS) {{
-                              if (url.contains(domain)) {{
-                                  return new WebResourceResponse("text/plain", "UTF-8", null);
-                              }}
-                          }}
-                          return super.shouldInterceptRequest(view, request);
-                      }}
-
-                      @Override
-                      public void onPageFinished(WebView view, String url) {{
-                          super.onPageFinished(view, url);
-                          String js = new String(Base64.decode("{float_js_b64}", Base64.DEFAULT));
-                          view.evaluateJavascript(js, null);
-                      }}
-                  }});
-              }}
-
-              // 核心修复：拦截返回键实现网页后退
-              @Override
-              public void onBackPressed() {{
                   WebView webView = this.bridge.getWebView();
-                  if (webView != null && webView.canGoBack()) {{
+                  webView.addJavascriptInterface(new Object() {
+                      @JavascriptInterface
+                      public void exitApp() { finish(); }
+                  }, "AndroidNative");
+
+                  webView.setWebViewClient(new BridgeWebViewClient(this.bridge) {
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                          String url = request.getUrl().toString();
+                          for (String domain : AD_DOMAINS) {
+                              if (url.contains(domain)) { return new WebResourceResponse("text/plain", "UTF-8", null); }
+                          }
+                          return super.shouldInterceptRequest(view, request);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {
+                          super.onPageFinished(view, url);
+                          view.evaluateJavascript(new String(Base64.decode("__B64_JS__", Base64.DEFAULT)), null);
+                      }
+                  });
+              }
+
+              // 核心修复 1：双击返回键唤出毛玻璃退出菜单
+              @Override
+              public void onBackPressed() {
+                  WebView webView = this.bridge.getWebView();
+                  if (webView != null && webView.canGoBack()) {
                       webView.goBack();
-                  }} else {{
-                      super.onBackPressed();
-                  }}
-              }}
-          }}
+                  } else {
+                      long currentTime = System.currentTimeMillis();
+                      if (currentTime - lastBackPressTime < 2000) {
+                          webView.evaluateJavascript("if(window.RealityApp) { window.RealityApp.showExitDialog(); }", null);
+                          lastBackPressTime = 0;
+                      } else {
+                          lastBackPressTime = currentTime;
+                          android.widget.Toast.makeText(this, "再按一次唤出退出菜单", android.widget.Toast.LENGTH_SHORT).show();
+                      }
+                  }
+              }
+          }
           """
+          java_code = java_code.replace('__AD_DOMAINS__', ad_array_str)
+          java_code = java_code.replace('__FULLSCREEN__', str(payload.get('fullscreen', False)).lower())
+          java_code = java_code.replace('__B64_JS__', float_js_b64)
+
           with open('android/app/src/main/java/com/reality/app/MainActivity.java', 'w') as f:
               f.write(java_code)
           EOF
