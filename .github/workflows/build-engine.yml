@@ -41,11 +41,8 @@ jobs:
       - name: 锻造专属 App 图标 (ImageMagick 暴力重绘)
         run: |
           npm install -g @capacitor/assets
-          
-          # 核心修复：先更新 Linux 软件源，再安装图形引擎，解决 404 报错
           sudo apt-get update
           sudo apt-get install -y imagemagick
-          
           mkdir -p assets
           
           if [ -n "${{ github.event.client_payload.icon_base64 }}" ]; then
@@ -56,7 +53,6 @@ jobs:
             curl -L -q "https://img.icons8.com/fluency/512/android-os.png" -o assets/icon_raw
           fi
           
-          # 强行洗帧转换成标准无透明通道的 PNG
           convert assets/icon_raw -resize 512x512 assets/icon.png
           cp assets/icon.png assets/splash.png
           npx @capacitor/assets generate --android
@@ -70,7 +66,7 @@ jobs:
 
           payload = json.loads(os.environ['PAYLOAD'])
 
-          # --- 1. 升级版 Adblock 规则引擎 ---
+          # --- 1. 升级版 Adblock 规则引擎 (深度清洗防崩溃版) ---
           ad_domains = set()
           ad_rules = payload.get('ad_rules', '')
           if ad_rules:
@@ -81,17 +77,29 @@ jobs:
                       lines = urllib.request.urlopen(req, timeout=10).read().decode('utf-8').splitlines()
                       for line in lines:
                           line = line.strip()
-                          if not line or line.startswith('#') or line.startswith('!'): continue
+                          # 忽略空行、注释行、白名单行
+                          if not line or line.startswith('#') or line.startswith('!') or line.startswith('@@') or line.startswith('['): continue
+                          # 核心防御：直接抛弃所有带有 ##, #@#, #?# 的 CSS 元素隐藏规则，它们不仅无用还会弄崩代码
+                          if '##' in line or '#@#' in line or '#?#' in line: continue
+                          
+                          domain = ""
                           if line.startswith('0.0.0.0 ') or line.startswith('127.0.0.1 '):
                               parts = line.split()
-                              if len(parts) >= 2: ad_domains.add(f'"{parts[1]}"')
+                              if len(parts) >= 2: domain = parts[1]
                           elif line.startswith('||') and '^' in line:
                               domain = line[2:line.find('^')]
+                          elif line.startswith('||'):
+                              domain = line[2:]
+                          elif '.' in line and ' ' not in line and '/' not in line and '=' not in line:
+                              domain = line
+                              
+                          if domain:
+                              # 终极防御：对提取出的域名进行 Java 字符串转义，防止内部残留的特殊符号炸毁 Java
+                              domain = domain.replace('\\', '\\\\').replace('"', '\\"')
                               ad_domains.add(f'"{domain}"')
-                          elif '.' in line and ' ' not in line and '/' not in line:
-                              ad_domains.add(f'"{line}"')
                   except Exception as e:
                       print('规则下载失败:', e)
+          # 最多保留 4000 条高质量网络拦截规则，防止低端机内存溢出
           ad_array_str = ','.join(list(ad_domains)[:4000])
 
           # --- 2. 悬浮球与毛玻璃 UI (纯 JS 构建) ---
