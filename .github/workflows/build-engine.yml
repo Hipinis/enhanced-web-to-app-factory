@@ -41,7 +41,11 @@ jobs:
       - name: 锻造专属 App 图标 (ImageMagick 暴力重绘)
         run: |
           npm install -g @capacitor/assets
+          
+          # 核心修复：先更新 Linux 软件源，再安装图形引擎，解决 404 报错
+          sudo apt-get update
           sudo apt-get install -y imagemagick
+          
           mkdir -p assets
           
           if [ -n "${{ github.event.client_payload.icon_base64 }}" ]; then
@@ -52,7 +56,7 @@ jobs:
             curl -L -q "https://img.icons8.com/fluency/512/android-os.png" -o assets/icon_raw
           fi
           
-          # 核心防线：强行洗帧转换成标准无透明通道的 PNG，粉碎一切图标报错
+          # 强行洗帧转换成标准无透明通道的 PNG
           convert assets/icon_raw -resize 512x512 assets/icon.png
           cp assets/icon.png assets/splash.png
           npx @capacitor/assets generate --android
@@ -195,11 +199,10 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  // 核心修复 2：状态栏重叠处理
                   if (__FULLSCREEN__) {
-                      getWindow().setFlags(1024, 1024); // FLAG_FULLSCREEN
+                      getWindow().setFlags(1024, 1024);
                   } else {
-                      androidx.core.view.WindowCompat.setDecorFitsSystemWindows(getWindow(), true); // 防止沉浸式霸占状态栏
+                      androidx.core.view.WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
                   }
 
                   WebView webView = this.bridge.getWebView();
@@ -226,7 +229,6 @@ jobs:
                   });
               }
 
-              // 核心修复 1：双击返回键唤出毛玻璃退出菜单
               @Override
               public void onBackPressed() {
                   WebView webView = this.bridge.getWebView();
