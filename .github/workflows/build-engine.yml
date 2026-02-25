@@ -1,7 +1,7 @@
 name: Production Factory Engine
 on:
   repository_dispatch:
-    types: [start_build]
+    types: [start_build] # 接收来自 Vercel 的生产指令
 
 jobs:
   build_android:
@@ -21,7 +21,7 @@ jobs:
           java-version: '21'
           distribution: 'temurin'
 
-      - name: 自动生成 Android 骨架并注入网址
+      - name: 自动生成 Android 骨架并注入核心配置
         run: |
           npm init -y
           npm install @capacitor/core @capacitor/cli @capacitor/android
@@ -29,14 +29,15 @@ jobs:
           # 创建占位网页目录
           mkdir www && echo "<html><body>Loading...</body></html>" > www/index.html
           
-          # 动态生成核心配置，直连你的目标网址
+          # 【修复点】：动态生成配置文件，加入了 allowNavigation: ["*"]，彻底禁止跳转外部浏览器
           echo '{
             "appId": "com.reality.app",
             "appName": "${{ github.event.client_payload.app_name }}",
             "webDir": "www",
             "server": {
               "url": "${{ github.event.client_payload.target_url }}",
-              "cleartext": true
+              "cleartext": true,
+              "allowNavigation": ["*"]
             }
           }' > capacitor.config.json
 
@@ -48,7 +49,7 @@ jobs:
         run: |
           cd android
           
-          # 【终极防线】：强制统一 Kotlin 版本，解决 Duplicate class 冲突
+          # 【防线】：强制统一 Kotlin 版本，解决冲突
           cat <<EOT >> app/build.gradle
           
           configurations.all {
