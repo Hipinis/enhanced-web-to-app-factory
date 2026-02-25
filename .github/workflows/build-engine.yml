@@ -10,13 +10,11 @@ jobs:
       - name: 检出图纸库
         uses: actions/checkout@v4
 
-      - name: 配置 Node.js 环境 (准备原材料)
+      - name: 配置 Node.js 和 Java 环境
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: 配置 Java 和 Android 环境
-        uses: actions/setup-java@v4
+      - uses: actions/setup-java@v4
         with:
           java-version: '21'
           distribution: 'temurin'
@@ -25,10 +23,8 @@ jobs:
         run: |
           npm init -y
           npm install @capacitor/core @capacitor/cli @capacitor/android
+          mkdir www && echo "<html><body style='background:#111;color:#fff;text-align:center;padding-top:50px;'>Loading...</body></html>" > www/index.html
           
-          mkdir www && echo "<html><body>Loading...</body></html>" > www/index.html
-          
-          # 核心修复：拦截所有网页跳转
           echo '{
             "appId": "com.reality.app",
             "appName": "${{ github.event.client_payload.app_name }}",
@@ -42,34 +38,148 @@ jobs:
 
           npx cap add android
 
-      - name: 锻造专属 App 图标 (支持 URL 与本地上传双策略)
+      - name: 锻造专属 App 图标
         run: |
           npm install -g @capacitor/assets
           mkdir -p assets
           
-          # 【双重策略解析】：优先 Base64，其次 URL，最后兜底
           if [ -n "${{ github.event.client_payload.icon_base64 }}" ]; then
-            echo "正在解析本地上传的文件..."
             echo "${{ github.event.client_payload.icon_base64 }}" | base64 -d > assets/icon.png
           elif [ -n "${{ github.event.client_payload.icon_url }}" ]; then
-            echo "正在拉取在线图片 URL..."
             wget -q -O assets/icon.png "${{ github.event.client_payload.icon_url }}"
           else
-            echo "未检测到图标，使用默认兜底..."
             wget -q -O assets/icon.png "https://img.icons8.com/fluency/512/android-os.png"
           fi
           
-          # 自动裁剪为 Android 各分辨率尺寸
+          # 补充 Splash 避免工具报错
+          cp assets/icon.png assets/splash.png
+          
           npx @capacitor/assets generate --android
-          npx cap sync android
+
+      - name: 终极底层手术 (注入广告拦截、悬浮球、返回键修复)
+        env:
+          PAYLOAD: ${{ toJSON(github.event.client_payload) }}
+        run: |
+          cat << 'EOF' > inject.py
+          import os, json, urllib.request, base64
+
+          payload = json.loads(os.environ['PAYLOAD'])
+
+          # 1. 组装 Native Alpha 广告规则
+          ad_domains = []
+          ad_rules = payload.get('ad_rules', '')
+          if ad_rules:
+              for url in ad_rules.split(','):
+                  if not url.strip(): continue
+                  try:
+                      req = urllib.request.Request(url.strip(), headers={'User-Agent': 'Mozilla/5.0'})
+                      lines = urllib.request.urlopen(req, timeout=10).read().decode('utf-8').split('\n')
+                      for line in lines:
+                          if line.startswith('||') and '^' in line:
+                              domain = line[2:line.find('^')]
+                              ad_domains.append(f'"{domain}"')
+                  except Exception as e:
+                      print('规则下载失败:', e)
+          ad_domains = ad_domains[:2000] # 限制数量防止内存溢出
+          ad_array_str = ','.join(ad_domains)
+
+          # 2. 构建悬浮球 JavaScript
+          float_js = """
+          (function(){
+              if(document.getElementById('reality-fab')) return;
+              var fab = document.createElement('div');
+              fab.id = 'reality-fab';
+              fab.innerHTML = '⚙️';
+              fab.style.cssText = 'position:fixed;bottom:80px;right:20px;width:50px;height:50px;background:rgba(0,0,0,0.7);color:#fff;border-radius:25px;text-align:center;line-height:50px;font-size:24px;z-index:999999;box-shadow:0 4px 10px rgba(0,0,0,0.3);cursor:pointer;backdrop-filter:blur(5px);';
+              document.body.appendChild(fab);
+              
+              var menu = document.createElement('div');
+              menu.style.cssText = 'display:none;position:fixed;bottom:140px;right:20px;background:rgba(0,0,0,0.8);border-radius:10px;padding:10px;z-index:999998;color:white;flex-direction:column;gap:10px;backdrop-filter:blur(5px);';
+              menu.innerHTML = '<div id="fab-dark" style="padding:8px 15px;background:#333;border-radius:5px;text-align:center;cursor:pointer;">🌙 黑暗模式</div>' + 
+                               '<div id="fab-exit" style="padding:8px 15px;background:#c0392b;border-radius:5px;text-align:center;cursor:pointer;">❌ 退出应用</div>';
+              document.body.appendChild(menu);
+              
+              fab.onclick = function() { menu.style.display = menu.style.display === 'none' ? 'flex' : 'none'; };
+              
+              document.getElementById('fab-dark').onclick = function() {
+                  document.documentElement.style.filter = document.documentElement.style.filter ? '' : 'invert(1) hue-rotate(180deg)';
+                  menu.style.display = 'none';
+              };
+              document.getElementById('fab-exit').onclick = function() { AndroidNative.exitApp(); };
+          })();
+          """
+          float_js_b64 = base64.b64encode(float_js.encode('utf-8')).decode('utf-8')
+
+          # 3. 生成并替换安卓底层 MainActivity.java
+          java_code = f"""
+          package com.reality.app;
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import com.getcapacitor.BridgeActivity;
+          import com.getcapacitor.BridgeWebViewClient;
+          import java.util.Arrays;
+          import java.util.List;
+          import android.util.Base64;
+          import android.webkit.JavascriptInterface;
+
+          public class MainActivity extends BridgeActivity {{
+              private static final List<String> AD_DOMAINS = Arrays.asList({ad_array_str});
+
+              @Override
+              public void onCreate(Bundle savedInstanceState) {{
+                  super.onCreate(savedInstanceState);
+                  WebView webView = this.bridge.getWebView();
+                  
+                  // 提供 JS 退出原生 App 的桥梁
+                  webView.addJavascriptInterface(new Object() {{
+                      @JavascriptInterface
+                      public void exitApp() {{ finish(); }}
+                  }}, "AndroidNative");
+
+                  webView.setWebViewClient(new BridgeWebViewClient(this.bridge) {{
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {{
+                          String url = request.getUrl().toString();
+                          for (String domain : AD_DOMAINS) {{
+                              if (url.contains(domain)) {{
+                                  return new WebResourceResponse("text/plain", "UTF-8", null);
+                              }}
+                          }}
+                          return super.shouldInterceptRequest(view, request);
+                      }}
+
+                      @Override
+                      public void onPageFinished(WebView view, String url) {{
+                          super.onPageFinished(view, url);
+                          String js = new String(Base64.decode("{float_js_b64}", Base64.DEFAULT));
+                          view.evaluateJavascript(js, null);
+                      }}
+                  }});
+              }}
+
+              // 核心修复：拦截返回键实现网页后退
+              @Override
+              public void onBackPressed() {{
+                  WebView webView = this.bridge.getWebView();
+                  if (webView != null && webView.canGoBack()) {{
+                      webView.goBack();
+                  }} else {{
+                      super.onBackPressed();
+                  }}
+              }}
+          }}
+          """
+          with open('android/app/src/main/java/com/reality/app/MainActivity.java', 'w') as f:
+              f.write(java_code)
+          EOF
+          python3 inject.py
 
       - name: 锻造真正的 APK
         run: |
           cd android
-          
-          # 强行统一 Kotlin 版本，防止冲突
           cat <<EOT >> app/build.gradle
-          
           configurations.all {
               resolutionStrategy.eachDependency { DependencyResolveDetails details ->
                   def requested = details.requested
@@ -79,7 +189,6 @@ jobs:
               }
           }
           EOT
-          
           chmod +x gradlew
           ./gradlew assembleDebug
 
