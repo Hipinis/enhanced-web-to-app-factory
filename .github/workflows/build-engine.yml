@@ -1,7 +1,7 @@
 name: Production Factory Engine
 on:
   repository_dispatch:
-    types: [start_build] # 接收来自 Vercel 的生产指令
+    types: [start_build]
 
 jobs:
   build_android:
@@ -26,10 +26,9 @@ jobs:
           npm init -y
           npm install @capacitor/core @capacitor/cli @capacitor/android
           
-          # 创建占位网页目录
           mkdir www && echo "<html><body>Loading...</body></html>" > www/index.html
           
-          # 【修复点】：动态生成配置文件，加入了 allowNavigation: ["*"]，彻底禁止跳转外部浏览器
+          # 核心修复：拦截所有网页跳转
           echo '{
             "appId": "com.reality.app",
             "appName": "${{ github.event.client_payload.app_name }}",
@@ -41,15 +40,34 @@ jobs:
             }
           }' > capacitor.config.json
 
-          # 初始化安卓工程
           npx cap add android
+
+      - name: 锻造专属 App 图标 (支持 URL 与本地上传双策略)
+        run: |
+          npm install -g @capacitor/assets
+          mkdir -p assets
+          
+          # 【双重策略解析】：优先 Base64，其次 URL，最后兜底
+          if [ -n "${{ github.event.client_payload.icon_base64 }}" ]; then
+            echo "正在解析本地上传的文件..."
+            echo "${{ github.event.client_payload.icon_base64 }}" | base64 -d > assets/icon.png
+          elif [ -n "${{ github.event.client_payload.icon_url }}" ]; then
+            echo "正在拉取在线图片 URL..."
+            wget -q -O assets/icon.png "${{ github.event.client_payload.icon_url }}"
+          else
+            echo "未检测到图标，使用默认兜底..."
+            wget -q -O assets/icon.png "https://img.icons8.com/fluency/512/android-os.png"
+          fi
+          
+          # 自动裁剪为 Android 各分辨率尺寸
+          npx @capacitor/assets generate --android
           npx cap sync android
 
       - name: 锻造真正的 APK
         run: |
           cd android
           
-          # 【防线】：强制统一 Kotlin 版本，解决冲突
+          # 强行统一 Kotlin 版本，防止冲突
           cat <<EOT >> app/build.gradle
           
           configurations.all {
