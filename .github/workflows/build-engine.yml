@@ -38,7 +38,7 @@ jobs:
 
           npx cap add android
 
-      - name: 锻造专属 App 图标 (保持原样)
+      - name: 锻造专属 App 图标
         run: |
           npm install -g @capacitor/assets
           sudo apt-get update
@@ -57,7 +57,7 @@ jobs:
           cp assets/icon.png assets/splash.png
           npx @capacitor/assets generate --android
 
-      - name: 终极底层手术 (双引擎广告屏蔽 + 状态栏防重叠)
+      - name: 终极底层手术 (强制转义双引擎广告拦截 + 物理级状态栏下压)
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
@@ -69,7 +69,6 @@ jobs:
           target_domain = urllib.parse.urlparse(target_url).hostname or ""
           target_domain = target_domain.replace('www.', '')
 
-          # --- 1. 强制载入三大权威规则库 ---
           target_ad_urls = [
               "https://filters.adtidy.org/extension/chromium/filters/11.txt",
               "https://filters.adtidy.org/extension/chromium/filters/2.txt",
@@ -85,15 +84,16 @@ jobs:
           for url in set(target_ad_urls):
               try:
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-                  lines = urllib.request.urlopen(req, timeout=15).read().decode('utf-8').splitlines()
+                  lines = urllib.request.urlopen(req, timeout=20).read().decode('utf-8').splitlines()
                   for line in lines:
                       line = line.strip()
                       if not line or line.startswith('!') or line.startswith('['): continue
                       
-                      # 提取 CSS 视觉隐藏规则 (过滤掉会导致 JS 报错的高级函数规则)
+                      # 1. 提取 CSS 视觉隐藏规则
                       if '##' in line:
                           try:
                               domain_part, selector = line.split('##', 1)
+                              if '$' in selector: selector = selector.split('$')[0]
                               if ':has(' in selector or ':upward(' in selector: continue
                               if not domain_part:
                                   css_selectors.add(selector)
@@ -104,24 +104,25 @@ jobs:
                                           css_selectors.add(selector)
                           except: pass
                       
-                      # 提取网络黑名单拦截规则
-                      elif line.startswith('||') and '^' in line:
-                          domain = line[2:line.find('^')]
+                      # 2. 提取网络黑名单 (深度清洗后缀，解决广告漏网问题)
+                      elif line.startswith('||'):
+                          domain = line[2:]
+                          if '^' in domain: domain = domain.split('^')[0]
+                          if '$' in domain: domain = domain.split('$')[0]
                           if '/' not in domain and '*' not in domain:
                               ad_domains.add(domain)
               except Exception as e:
                   print(f"规则库下载失败: {e}")
 
-          # 分别写入两套防御系统文件
           os.makedirs('android/app/src/main/assets', exist_ok=True)
           with open('android/app/src/main/assets/adblock_rules.txt', 'w', encoding='utf-8') as f:
               f.write('\n'.join(ad_domains))
 
           with open('android/app/src/main/assets/adblock.css', 'w', encoding='utf-8') as f:
               if css_selectors:
-                  f.write(',\n'.join(css_selectors) + " { display: none !important; width: 0 !important; height: 0 !important; opacity: 0 !important; pointer-events: none !important; }")
+                  f.write(',\n'.join(css_selectors) + " { display: none !important; width: 0 !important; height: 0 !important; opacity: 0 !important; pointer-events: none !important; z-index: -1 !important; }")
 
-          # --- 2. 悬浮球 UI (完全保持上个版本，增加了植入 adblock.css 的指令) ---
+          # 悬浮球 UI (不变)
           float_js = """
           (function(){
               if(document.getElementById('reality-fab')) return;
@@ -132,14 +133,8 @@ jobs:
               document.body.appendChild(dialogOverlay);
 
               window.RealityApp = {
-                  showExitDialog: function() {
-                      dialogOverlay.style.display = 'flex';
-                      setTimeout(function(){ dialogOverlay.style.opacity = '1'; }, 10);
-                  },
-                  hideExitDialog: function() {
-                      dialogOverlay.style.opacity = '0';
-                      setTimeout(function(){ dialogOverlay.style.display = 'none'; }, 300);
-                  }
+                  showExitDialog: function() { dialogOverlay.style.display = 'flex'; setTimeout(function(){ dialogOverlay.style.opacity = '1'; }, 10); },
+                  hideExitDialog: function() { dialogOverlay.style.opacity = '0'; setTimeout(function(){ dialogOverlay.style.display = 'none'; }, 300); }
               };
               document.getElementById('btn-cancel-exit').onclick = window.RealityApp.hideExitDialog;
               document.getElementById('btn-confirm-exit').onclick = function() { AndroidNative.exitApp(); };
@@ -164,9 +159,7 @@ jobs:
               if('__FLOAT_DARK__' === 'True') mHTML += '<div id="fab-dark" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🌙 黑暗模式</div>';
               
               var cMenus = __CUSTOM_MENUS__;
-              cMenus.forEach(function(item, idx) {
-                  mHTML += '<div id="fab-custom-'+idx+'" data-url="'+item.url+'" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🔗 '+item.label+'</div>';
-              });
+              cMenus.forEach(function(item, idx) { mHTML += '<div id="fab-custom-'+idx+'" data-url="'+item.url+'" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🔗 '+item.label+'</div>'; });
               
               if('__FLOAT_EXIT__' === 'True') mHTML += '<div id="fab-exit" style="padding:10px 15px;background:rgba(231,76,60,0.3);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;color:#ff7675;">❌ 退出应用</div>';
               
@@ -174,28 +167,15 @@ jobs:
               document.body.appendChild(menu);
 
               fab.onclick = function() {
-                  if(menu.style.display === 'none') {
-                      menu.style.display = 'flex'; setTimeout(function(){ menu.style.transform='scale(1)'; menu.style.opacity='1'; },10);
-                  } else {
-                      menu.style.transform='scale(0.9)'; menu.style.opacity='0'; setTimeout(function(){ menu.style.display='none'; },200);
-                  }
+                  if(menu.style.display === 'none') { menu.style.display = 'flex'; setTimeout(function(){ menu.style.transform='scale(1)'; menu.style.opacity='1'; },10); } 
+                  else { menu.style.transform='scale(0.9)'; menu.style.opacity='0'; setTimeout(function(){ menu.style.display='none'; },200); }
               };
 
               if(document.getElementById('fab-home')) document.getElementById('fab-home').onclick = function() { window.location.href = '__HOME_URL__' || '__TARGET_URL__'; };
               if(document.getElementById('fab-trans')) document.getElementById('fab-trans').onclick = function() { window.location.href = "https://translate.google.com/translate?sl=auto&tl=zh-CN&u=" + encodeURIComponent(window.location.href); };
               if(document.getElementById('fab-dark')) document.getElementById('fab-dark').onclick = function() { document.documentElement.style.filter = document.documentElement.style.filter ? '' : 'invert(1) hue-rotate(180deg)'; };
-              cMenus.forEach(function(item, idx) {
-                  var el = document.getElementById('fab-custom-'+idx);
-                  if(el) el.onclick = function() { window.location.href = this.getAttribute('data-url'); };
-              });
+              cMenus.forEach(function(item, idx) { var el = document.getElementById('fab-custom-'+idx); if(el) el.onclick = function() { window.location.href = this.getAttribute('data-url'); }; });
               if(document.getElementById('fab-exit')) document.getElementById('fab-exit').onclick = function() { menu.style.display='none'; window.RealityApp.showExitDialog(); };
-              
-              /* 动态植入广告隐形斗篷 (CSS) */
-              var adLink = document.createElement('link');
-              adLink.rel = 'stylesheet';
-              adLink.type = 'text/css';
-              adLink.href = 'https://app.local/adblock.css';
-              document.head.appendChild(adLink);
           })();
           """
           float_js = float_js.replace('__FLOAT_ICON_URL__', payload.get('float_icon_url', ''))
@@ -220,15 +200,14 @@ jobs:
           import java.util.HashSet;
           import java.io.BufferedReader;
           import java.io.InputStreamReader;
+          import java.io.InputStream;
           import android.util.Base64;
           import android.webkit.JavascriptInterface;
           import android.net.Uri;
-          import androidx.core.view.ViewCompat;
-          import androidx.core.view.WindowInsetsCompat;
-          import androidx.core.graphics.Insets;
 
           public class MainActivity extends BridgeActivity {
               private HashSet<String> adBlockSet = new HashSet<>();
+              private String adblockCss = "";
               private long lastBackPressTime = 0;
 
               @Override
@@ -237,25 +216,30 @@ jobs:
                   
                   WebView webView = this.bridge.getWebView();
                   
-                  // 【核心修复2】：状态栏防重叠 (动态计算状态栏高度并下压网页)
+                  // 【核心防线】：通过物理 Padding 强制网页避开状态栏高度
                   if (__FULLSCREEN__) {
                       getWindow().setFlags(1024, 1024);
                   } else {
-                      ViewCompat.setOnApplyWindowInsetsListener(webView, (v, windowInsets) -> {
-                          Insets insets = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars());
-                          v.setPadding(0, insets.top, 0, 0);
-                          return windowInsets;
-                      });
+                      int statusBarHeight = 0;
+                      int resourceId = getResources().getIdentifier("status_bar_height", "dimen", "android");
+                      if (resourceId > 0) {
+                          statusBarHeight = getResources().getDimensionPixelSize(resourceId);
+                      }
+                      webView.setPadding(0, statusBarHeight, 0, 0);
                   }
 
                   new Thread(() -> {
                       try {
                           BufferedReader reader = new BufferedReader(new InputStreamReader(getAssets().open("adblock_rules.txt")));
                           String line;
-                          while ((line = reader.readLine()) != null) {
-                              adBlockSet.add(line.trim());
-                          }
+                          while ((line = reader.readLine()) != null) { adBlockSet.add(line.trim()); }
                           reader.close();
+                          
+                          InputStream is = getAssets().open("adblock.css");
+                          byte[] buffer = new byte[is.available()];
+                          is.read(buffer);
+                          is.close();
+                          adblockCss = new String(buffer, "UTF-8");
                       } catch (Exception e) {}
                   }).start();
 
@@ -268,15 +252,6 @@ jobs:
                       @Override
                       public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                           Uri uri = request.getUrl();
-                          String urlStr = uri.toString();
-                          
-                          // 【核心修复1】：拦截本地伪装请求，向网页释放隐形斗篷 (CSS)
-                          if (urlStr.equals("https://app.local/adblock.css")) {
-                              try {
-                                  return new WebResourceResponse("text/css", "UTF-8", getAssets().open("adblock.css"));
-                              } catch (Exception e) {}
-                          }
-
                           if (uri != null && uri.getHost() != null) {
                               String host = uri.getHost();
                               String[] parts = host.split("\\\\.");
@@ -296,6 +271,19 @@ jobs:
                       public void onPageFinished(WebView view, String url) {
                           super.onPageFinished(view, url);
                           view.evaluateJavascript(new String(Base64.decode("__B64_JS__", Base64.DEFAULT)), null);
+                          
+                          // 【核心杀招】：绕过 CSP，将 CSS 隐形规则强行注入网页内核
+                          if (!adblockCss.isEmpty()) {
+                              String encodedCss = Base64.encodeToString(adblockCss.getBytes(), Base64.NO_WRAP);
+                              String injectCssJs = "javascript:(function() {" +
+                                  "var parent = document.getElementsByTagName('head').item(0) || document.documentElement;" +
+                                  "var style = document.createElement('style');" +
+                                  "style.type = 'text/css';" +
+                                  "style.innerHTML = decodeURIComponent(escape(window.atob('" + encodedCss + "')));" +
+                                  "parent.appendChild(style);" +
+                                  "})()";
+                              view.evaluateJavascript(injectCssJs, null);
+                          }
                       }
                   });
               }
