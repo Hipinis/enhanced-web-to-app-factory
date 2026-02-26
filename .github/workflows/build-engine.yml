@@ -23,13 +23,8 @@ jobs:
         run: |
           npm init -y
           npm install @capacitor/core @capacitor/cli @capacitor/android
-          
-          # 【修复问题2】：安装官方状态栏插件，专门解决顶部重叠问题
-          npm install @capacitor/status-bar
-          
           mkdir www && echo "<html><body style='background:#111;color:#fff;text-align:center;padding-top:50px;'>Loading...</body></html>" > www/index.html
           
-          # 【修复问题2】：配置 StatusBar 的 overlaysWebView 为 false，让网页避开状态栏
           echo '{
             "appId": "com.reality.app",
             "appName": "${{ github.event.client_payload.app_name }}",
@@ -38,17 +33,12 @@ jobs:
               "url": "${{ github.event.client_payload.target_url }}",
               "cleartext": true,
               "allowNavigation": ["*"]
-            },
-            "plugins": {
-              "StatusBar": {
-                "overlaysWebView": false
-              }
             }
           }' > capacitor.config.json
 
           npx cap add android
 
-      - name: 锻造专属 App 图标 (保持不变)
+      - name: 锻造专属 App 图标 (保持原样)
         run: |
           npm install -g @capacitor/assets
           sudo apt-get update
@@ -67,16 +57,19 @@ jobs:
           cp assets/icon.png assets/splash.png
           npx @capacitor/assets generate --android
 
-      - name: 终极底层手术 (独立加载十几万条广告策略 + UI悬浮球)
+      - name: 终极底层手术 (双引擎广告屏蔽 + 状态栏防重叠)
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
           cat << 'EOF' > inject.py
-          import os, json, urllib.request, base64
+          import os, json, urllib.request, urllib.parse, base64
 
           payload = json.loads(os.environ['PAYLOAD'])
+          target_url = payload.get('target_url', '')
+          target_domain = urllib.parse.urlparse(target_url).hostname or ""
+          target_domain = target_domain.replace('www.', '')
 
-          # --- 1. 修复问题1：硬核屏蔽引擎 (硬编码加载你指定的三大权威规则库) ---
+          # --- 1. 强制载入三大权威规则库 ---
           target_ad_urls = [
               "https://filters.adtidy.org/extension/chromium/filters/11.txt",
               "https://filters.adtidy.org/extension/chromium/filters/2.txt",
@@ -87,6 +80,8 @@ jobs:
               target_ad_urls.extend([u.strip() for u in user_rules.split(',') if u.strip()])
 
           ad_domains = set()
+          css_selectors = set()
+
           for url in set(target_ad_urls):
               try:
                   req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
@@ -94,20 +89,39 @@ jobs:
                   for line in lines:
                       line = line.strip()
                       if not line or line.startswith('!') or line.startswith('['): continue
-                      # 仅精确提取带有 ||domain.com^ 格式的网络拦截核心域名
-                      if line.startswith('||') and '^' in line:
+                      
+                      # 提取 CSS 视觉隐藏规则 (过滤掉会导致 JS 报错的高级函数规则)
+                      if '##' in line:
+                          try:
+                              domain_part, selector = line.split('##', 1)
+                              if ':has(' in selector or ':upward(' in selector: continue
+                              if not domain_part:
+                                  css_selectors.add(selector)
+                              else:
+                                  for d in domain_part.split(','):
+                                      if d.startswith('~'): continue
+                                      if d in target_domain or target_domain in d:
+                                          css_selectors.add(selector)
+                          except: pass
+                      
+                      # 提取网络黑名单拦截规则
+                      elif line.startswith('||') and '^' in line:
                           domain = line[2:line.find('^')]
                           if '/' not in domain and '*' not in domain:
                               ad_domains.add(domain)
               except Exception as e:
-                  print(f"Failed to fetch {url}: {e}")
+                  print(f"规则库下载失败: {e}")
 
-          # 【核心突破】：将解析出的十几万条规则写成 txt 资产文件（完美绕过 Java 编译时的数组上限报错）
+          # 分别写入两套防御系统文件
           os.makedirs('android/app/src/main/assets', exist_ok=True)
           with open('android/app/src/main/assets/adblock_rules.txt', 'w', encoding='utf-8') as f:
               f.write('\n'.join(ad_domains))
 
-          # --- 2. 悬浮球与毛玻璃 UI (纯 JS 构建 - 完全保持上一个版本的满意代码) ---
+          with open('android/app/src/main/assets/adblock.css', 'w', encoding='utf-8') as f:
+              if css_selectors:
+                  f.write(',\n'.join(css_selectors) + " { display: none !important; width: 0 !important; height: 0 !important; opacity: 0 !important; pointer-events: none !important; }")
+
+          # --- 2. 悬浮球 UI (完全保持上个版本，增加了植入 adblock.css 的指令) ---
           float_js = """
           (function(){
               if(document.getElementById('reality-fab')) return;
@@ -175,6 +189,13 @@ jobs:
                   if(el) el.onclick = function() { window.location.href = this.getAttribute('data-url'); };
               });
               if(document.getElementById('fab-exit')) document.getElementById('fab-exit').onclick = function() { menu.style.display='none'; window.RealityApp.showExitDialog(); };
+              
+              /* 动态植入广告隐形斗篷 (CSS) */
+              var adLink = document.createElement('link');
+              adLink.rel = 'stylesheet';
+              adLink.type = 'text/css';
+              adLink.href = 'https://app.local/adblock.css';
+              document.head.appendChild(adLink);
           })();
           """
           float_js = float_js.replace('__FLOAT_ICON_URL__', payload.get('float_icon_url', ''))
@@ -187,7 +208,7 @@ jobs:
           float_js = float_js.replace('__CUSTOM_MENUS__', json.dumps(payload.get('custom_menus', [])))
           float_js_b64 = base64.b64encode(float_js.encode('utf-8')).decode('utf-8')
 
-          # --- 3. 安卓底层核心注入 (异步加载文本规则，防止卡死) ---
+          # --- 3. 安卓底层核心注入 ---
           java_code = """
           package com.reality.app;
           import android.os.Bundle;
@@ -202,6 +223,9 @@ jobs:
           import android.util.Base64;
           import android.webkit.JavascriptInterface;
           import android.net.Uri;
+          import androidx.core.view.ViewCompat;
+          import androidx.core.view.WindowInsetsCompat;
+          import androidx.core.graphics.Insets;
 
           public class MainActivity extends BridgeActivity {
               private HashSet<String> adBlockSet = new HashSet<>();
@@ -211,11 +235,19 @@ jobs:
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
+                  WebView webView = this.bridge.getWebView();
+                  
+                  // 【核心修复2】：状态栏防重叠 (动态计算状态栏高度并下压网页)
                   if (__FULLSCREEN__) {
                       getWindow().setFlags(1024, 1024);
+                  } else {
+                      ViewCompat.setOnApplyWindowInsetsListener(webView, (v, windowInsets) -> {
+                          Insets insets = windowInsets.getInsets(WindowInsetsCompat.Type.statusBars());
+                          v.setPadding(0, insets.top, 0, 0);
+                          return windowInsets;
+                      });
                   }
 
-                  // 【核心修复】：在后台线程极速加载十几万条本地广告规则，完全不卡界面
                   new Thread(() -> {
                       try {
                           BufferedReader reader = new BufferedReader(new InputStreamReader(getAssets().open("adblock_rules.txt")));
@@ -227,7 +259,6 @@ jobs:
                       } catch (Exception e) {}
                   }).start();
 
-                  WebView webView = this.bridge.getWebView();
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public void exitApp() { finish(); }
@@ -237,16 +268,24 @@ jobs:
                       @Override
                       public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                           Uri uri = request.getUrl();
+                          String urlStr = uri.toString();
+                          
+                          // 【核心修复1】：拦截本地伪装请求，向网页释放隐形斗篷 (CSS)
+                          if (urlStr.equals("https://app.local/adblock.css")) {
+                              try {
+                                  return new WebResourceResponse("text/css", "UTF-8", getAssets().open("adblock.css"));
+                              } catch (Exception e) {}
+                          }
+
                           if (uri != null && uri.getHost() != null) {
                               String host = uri.getHost();
                               String[] parts = host.split("\\\\.");
                               StringBuilder checkDomain = new StringBuilder();
-                              // 极速子域名匹配算法 (如拦截目标是 perchance.org，请求是 ad.perchance.org，将会被精准拦截)
                               for (int i = parts.length - 1; i >= 0; i--) {
                                   if (checkDomain.length() > 0) checkDomain.insert(0, ".");
                                   checkDomain.insert(0, parts[i]);
                                   if (adBlockSet.contains(checkDomain.toString())) {
-                                      return new WebResourceResponse("text/plain", "UTF-8", null); // 直接斩断请求，呈现干净的网页
+                                      return new WebResourceResponse("text/plain", "UTF-8", null);
                                   }
                               }
                           }
