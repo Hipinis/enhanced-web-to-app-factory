@@ -22,13 +22,20 @@ jobs:
       - name: 自动生成 Android 骨架并注入核心配置
         run: |
           npm init -y
-          npm install @capacitor/core @capacitor/cli @capacitor/android
+          # 核心修复：引入 status-bar 插件解决顶部状态栏重叠问题
+          npm install @capacitor/core @capacitor/cli @capacitor/android @capacitor/status-bar
           mkdir www && echo "<html><body style='background:#111;color:#fff;text-align:center;padding-top:50px;'>Loading...</body></html>" > www/index.html
           
           echo '{
             "appId": "com.reality.app",
             "appName": "${{ github.event.client_payload.app_name }}",
             "webDir": "www",
+            "plugins": {
+              "StatusBar": {
+                "overlaysWebView": false,
+                "style": "DARK"
+              }
+            },
             "server": {
               "url": "${{ github.event.client_payload.target_url }}",
               "cleartext": true,
@@ -38,17 +45,18 @@ jobs:
 
           npx cap add android
 
-      - name: 锻造专属 App 图标 (ImageMagick 暴力重绘)
+      - name: 锻造专属 App 图标 (突破防盗链重绘)
         run: |
           npm install -g @capacitor/assets
           sudo apt-get update
           sudo apt-get install -y imagemagick
           mkdir -p assets
           
+          # 核心修复：加入 -A "Mozilla/5.0" 伪装成浏览器，突破绝大多数图床的防盗链拦截
           if [ -n "${{ github.event.client_payload.icon_base64 }}" ]; then
             echo "${{ github.event.client_payload.icon_base64 }}" | base64 -d > assets/icon_raw
           elif [ -n "${{ github.event.client_payload.icon_url }}" ]; then
-            curl -L -q "${{ github.event.client_payload.icon_url }}" -o assets/icon_raw
+            curl -L -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" -q "${{ github.event.client_payload.icon_url }}" -o assets/icon_raw
           else
             curl -L -q "https://img.icons8.com/fluency/512/android-os.png" -o assets/icon_raw
           fi
@@ -66,7 +74,7 @@ jobs:
 
           payload = json.loads(os.environ['PAYLOAD'])
 
-          # --- 1. 升级版 Adblock 规则引擎 (深度清洗防崩溃版) ---
+          # --- 1. 网络层 Adblock 规则引擎 ---
           ad_domains = set()
           ad_rules = payload.get('ad_rules', '')
           if ad_rules:
@@ -77,11 +85,8 @@ jobs:
                       lines = urllib.request.urlopen(req, timeout=10).read().decode('utf-8').splitlines()
                       for line in lines:
                           line = line.strip()
-                          # 忽略空行、注释行、白名单行
                           if not line or line.startswith('#') or line.startswith('!') or line.startswith('@@') or line.startswith('['): continue
-                          # 核心防御：直接抛弃所有带有 ##, #@#, #?# 的 CSS 元素隐藏规则，它们不仅无用还会弄崩代码
                           if '##' in line or '#@#' in line or '#?#' in line: continue
-                          
                           domain = ""
                           if line.startswith('0.0.0.0 ') or line.startswith('127.0.0.1 '):
                               parts = line.split()
@@ -92,20 +97,29 @@ jobs:
                               domain = line[2:]
                           elif '.' in line and ' ' not in line and '/' not in line and '=' not in line:
                               domain = line
-                              
                           if domain:
-                              # 终极防御：对提取出的域名进行 Java 字符串转义，防止内部残留的特殊符号炸毁 Java
                               domain = domain.replace('\\', '\\\\').replace('"', '\\"')
                               ad_domains.add(f'"{domain}"')
                   except Exception as e:
-                      print('规则下载失败:', e)
-          # 最多保留 4000 条高质量网络拦截规则，防止低端机内存溢出
+                      pass
           ad_array_str = ','.join(list(ad_domains)[:4000])
 
-          # --- 2. 悬浮球与毛玻璃 UI (纯 JS 构建) ---
+          # --- 2. 悬浮球、无缝翻译与 DOM 终结者 (JS) ---
           float_js = """
           (function(){
               if(document.getElementById('reality-fab')) return;
+
+              /* 核心修复：DOM 广告终结者 (专门对付 Perchance 等顽固牛皮癣) */
+              setInterval(function(){
+                  var ads = document.querySelectorAll('iframe, ins, [class*="ad-"], [class*="adsby"], [id*="ad-"], [id*="google_ads"], .ad-container');
+                  for(var i=0; i<ads.length; i++) {
+                      if(ads[i].style.display !== 'none') {
+                          ads[i].style.display = 'none';
+                          ads[i].style.width = '0';
+                          ads[i].style.height = '0';
+                      }
+                  }
+              }, 1000);
 
               /* 毛玻璃退出对话框 */
               var dialogOverlay = document.createElement('div');
@@ -114,14 +128,8 @@ jobs:
               document.body.appendChild(dialogOverlay);
 
               window.RealityApp = {
-                  showExitDialog: function() {
-                      dialogOverlay.style.display = 'flex';
-                      setTimeout(function(){ dialogOverlay.style.opacity = '1'; }, 10);
-                  },
-                  hideExitDialog: function() {
-                      dialogOverlay.style.opacity = '0';
-                      setTimeout(function(){ dialogOverlay.style.display = 'none'; }, 300);
-                  }
+                  showExitDialog: function() { dialogOverlay.style.display = 'flex'; setTimeout(function(){ dialogOverlay.style.opacity = '1'; }, 10); },
+                  hideExitDialog: function() { dialogOverlay.style.opacity = '0'; setTimeout(function(){ dialogOverlay.style.display = 'none'; }, 300); }
               };
               document.getElementById('btn-cancel-exit').onclick = window.RealityApp.hideExitDialog;
               document.getElementById('btn-confirm-exit').onclick = function() { AndroidNative.exitApp(); };
@@ -132,7 +140,7 @@ jobs:
               var fabIconUrl = '__FLOAT_ICON_URL__';
               var fabBase64 = '__FLOAT_ICON_BASE64__';
               if(fabBase64) { fab.innerHTML = '<img src="data:image/png;base64,' + fabBase64 + '" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">'; }
-              else if(fabIconUrl) { fab.innerHTML = '<img src="' + fabIconUrl + '" style="width:100%;height:100%;border-radius:50%;object-fit:cover;">'; }
+              else if(fabIconUrl) { fab.innerHTML = '<img src="' + fabIconUrl + '" style="width:100%;height:100%;border-radius:50%;object-fit:cover;" onerror="this.outerHTML=\\'⚙️\\'">'; }
               else { fab.innerHTML = '⚙️'; }
               
               fab.style.cssText = 'position:fixed;bottom:50px;right:20px;width:50px;height:50px;background:rgba(255,255,255,0.2);color:#fff;border-radius:25px;text-align:center;line-height:50px;font-size:24px;z-index:999998;box-shadow:0 4px 15px rgba(0,0,0,0.3);cursor:pointer;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);border:1px solid rgba(255,255,255,0.1);display:flex;align-items:center;justify-content:center;overflow:hidden;';
@@ -140,34 +148,43 @@ jobs:
 
               /* 悬浮菜单 */
               var menu = document.createElement('div');
-              menu.style.cssText = 'display:none;position:fixed;bottom:110px;right:20px;background:rgba(0,0,0,0.7);border-radius:15px;padding:10px;z-index:999997;color:white;flex-direction:column;gap:10px;backdrop-filter:blur(15px);transform:scale(0.9);opacity:0;transition:all 0.2s;';
+              menu.style.cssText = 'display:none;position:fixed;bottom:110px;right:20px;background:rgba(0,0,0,0.8);border-radius:15px;padding:10px;z-index:999997;color:white;flex-direction:column;gap:10px;backdrop-filter:blur(15px);transform:scale(0.9);opacity:0;transition:all 0.2s;';
               
               var mHTML = '';
               mHTML += '<div id="fab-home" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🏠 返回首页</div>';
-              if('__FLOAT_TRANS__' === 'True') mHTML += '<div id="fab-trans" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🌐 网页翻译</div>';
+              if('__FLOAT_TRANS__' === 'True') mHTML += '<div id="fab-trans" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🌐 原地翻译</div>';
               if('__FLOAT_DARK__' === 'True') mHTML += '<div id="fab-dark" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🌙 黑暗模式</div>';
               
               var cMenus = __CUSTOM_MENUS__;
-              cMenus.forEach(function(item, idx) {
-                  mHTML += '<div id="fab-custom-'+idx+'" data-url="'+item.url+'" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🔗 '+item.label+'</div>';
-              });
-              
+              cMenus.forEach(function(item, idx) { mHTML += '<div id="fab-custom-'+idx+'" data-url="'+item.url+'" style="padding:10px 15px;background:rgba(255,255,255,0.1);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;white-space:nowrap;">🔗 '+item.label+'</div>'; });
               if('__FLOAT_EXIT__' === 'True') mHTML += '<div id="fab-exit" style="padding:10px 15px;background:rgba(231,76,60,0.3);border-radius:8px;text-align:center;cursor:pointer;font-size:14px;color:#ff7675;">❌ 退出应用</div>';
-              
               menu.innerHTML = mHTML;
               document.body.appendChild(menu);
 
               fab.onclick = function() {
-                  if(menu.style.display === 'none') {
-                      menu.style.display = 'flex'; setTimeout(function(){ menu.style.transform='scale(1)'; menu.style.opacity='1'; },10);
-                  } else {
-                      menu.style.transform='scale(0.9)'; menu.style.opacity='0'; setTimeout(function(){ menu.style.display='none'; },200);
-                  }
+                  if(menu.style.display === 'none') { menu.style.display = 'flex'; setTimeout(function(){ menu.style.transform='scale(1)'; menu.style.opacity='1'; },10); } 
+                  else { menu.style.transform='scale(0.9)'; menu.style.opacity='0'; setTimeout(function(){ menu.style.display='none'; },200); }
               };
 
               if(document.getElementById('fab-home')) document.getElementById('fab-home').onclick = function() { window.location.href = '__HOME_URL__' || '__TARGET_URL__'; };
-              if(document.getElementById('fab-trans')) document.getElementById('fab-trans').onclick = function() { window.location.href = "https://translate.google.com/translate?sl=auto&tl=zh-CN&u=" + encodeURIComponent(window.location.href); };
               if(document.getElementById('fab-dark')) document.getElementById('fab-dark').onclick = function() { document.documentElement.style.filter = document.documentElement.style.filter ? '' : 'invert(1) hue-rotate(180deg)'; };
+              
+              /* 核心修复：无缝内嵌式翻译引擎 */
+              if(document.getElementById('fab-trans')) document.getElementById('fab-trans').onclick = function() {
+                  menu.style.display='none';
+                  if(document.getElementById('reality-translate-widget')) return;
+                  var tWidget = document.createElement('div');
+                  tWidget.id = 'reality-translate-widget';
+                  tWidget.style.cssText = 'position:fixed;top:0;left:0;width:100%;background:white;z-index:9999999;box-shadow:0 2px 10px rgba(0,0,0,0.2);text-align:center;';
+                  document.body.prepend(tWidget);
+                  window.realityTranslateInit = function() {
+                      new google.translate.TranslateElement({pageLanguage: 'auto', includedLanguages: 'zh-CN,en,ja', layout: google.translate.TranslateElement.InlineLayout.SIMPLE, autoDisplay: false}, 'reality-translate-widget');
+                  };
+                  var s = document.createElement('script');
+                  s.src = 'https://translate.google.com/translate_a/element.js?cb=realityTranslateInit';
+                  document.head.appendChild(s);
+              };
+
               cMenus.forEach(function(item, idx) {
                   var el = document.getElementById('fab-custom-'+idx);
                   if(el) el.onclick = function() { window.location.href = this.getAttribute('data-url'); };
@@ -206,13 +223,8 @@ jobs:
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
+                  if (__FULLSCREEN__) { getWindow().setFlags(1024, 1024); }
                   
-                  if (__FULLSCREEN__) {
-                      getWindow().setFlags(1024, 1024);
-                  } else {
-                      androidx.core.view.WindowCompat.setDecorFitsSystemWindows(getWindow(), true);
-                  }
-
                   WebView webView = this.bridge.getWebView();
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
@@ -228,7 +240,6 @@ jobs:
                           }
                           return super.shouldInterceptRequest(view, request);
                       }
-
                       @Override
                       public void onPageFinished(WebView view, String url) {
                           super.onPageFinished(view, url);
