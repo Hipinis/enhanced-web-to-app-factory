@@ -57,7 +57,7 @@ jobs:
           cp assets/icon.png assets/splash.png
           npx @capacitor/assets generate --android
 
-      - name: 终极底层手术 (强制转义双引擎广告拦截 + 物理级状态栏下压)
+      - name: 终极底层手术 (同源欺骗木马屏蔽 + 根视图物理下压)
         env:
           PAYLOAD: ${{ toJSON(github.event.client_payload) }}
         run: |
@@ -89,12 +89,12 @@ jobs:
                       line = line.strip()
                       if not line or line.startswith('!') or line.startswith('['): continue
                       
-                      # 1. 提取 CSS 视觉隐藏规则
+                      # 1. 提取视觉隐藏规则 (安全过滤)
                       if '##' in line:
                           try:
                               domain_part, selector = line.split('##', 1)
                               if '$' in selector: selector = selector.split('$')[0]
-                              if ':has(' in selector or ':upward(' in selector: continue
+                              if ':has(' in selector or ':upward(' in selector or '{' in selector: continue
                               if not domain_part:
                                   css_selectors.add(selector)
                               else:
@@ -104,12 +104,12 @@ jobs:
                                           css_selectors.add(selector)
                           except: pass
                       
-                      # 2. 提取网络黑名单 (深度清洗后缀，解决广告漏网问题)
+                      # 2. 提取网络黑名单
                       elif line.startswith('||'):
                           domain = line[2:]
                           if '^' in domain: domain = domain.split('^')[0]
                           if '$' in domain: domain = domain.split('$')[0]
-                          if '/' not in domain and '*' not in domain:
+                          if '/' not in domain:
                               ad_domains.add(domain)
               except Exception as e:
                   print(f"规则库下载失败: {e}")
@@ -118,11 +118,12 @@ jobs:
           with open('android/app/src/main/assets/adblock_rules.txt', 'w', encoding='utf-8') as f:
               f.write('\n'.join(ad_domains))
 
+          # 将提纯后的 CSS 写入本地文件
           with open('android/app/src/main/assets/adblock.css', 'w', encoding='utf-8') as f:
               if css_selectors:
-                  f.write(',\n'.join(css_selectors) + " { display: none !important; width: 0 !important; height: 0 !important; opacity: 0 !important; pointer-events: none !important; z-index: -1 !important; }")
+                  f.write(',\n'.join(css_selectors) + " { display: none !important; width: 0 !important; height: 0 !important; opacity: 0 !important; pointer-events: none !important; z-index: -1 !important; visibility: hidden !important; }")
 
-          # 悬浮球 UI (不变)
+          # 完美保留的悬浮球 UI
           float_js = """
           (function(){
               if(document.getElementById('reality-fab')) return;
@@ -176,6 +177,14 @@ jobs:
               if(document.getElementById('fab-dark')) document.getElementById('fab-dark').onclick = function() { document.documentElement.style.filter = document.documentElement.style.filter ? '' : 'invert(1) hue-rotate(180deg)'; };
               cMenus.forEach(function(item, idx) { var el = document.getElementById('fab-custom-'+idx); if(el) el.onclick = function() { window.location.href = this.getAttribute('data-url'); }; });
               if(document.getElementById('fab-exit')) document.getElementById('fab-exit').onclick = function() { menu.style.display='none'; window.RealityApp.showExitDialog(); };
+              
+              // 【核心杀招】：同源欺骗注入法！绕过 1MB 限制和 CSP 护盾
+              var adLink = document.createElement('link');
+              adLink.rel = 'stylesheet';
+              adLink.type = 'text/css';
+              // 使用当前网页的源伪装成正常请求
+              adLink.href = window.location.origin + '/reality_internal_adblock.css?v=1';
+              document.head.appendChild(adLink);
           })();
           """
           float_js = float_js.replace('__FLOAT_ICON_URL__', payload.get('float_icon_url', ''))
@@ -200,32 +209,25 @@ jobs:
           import java.util.HashSet;
           import java.io.BufferedReader;
           import java.io.InputStreamReader;
-          import java.io.InputStream;
           import android.util.Base64;
           import android.webkit.JavascriptInterface;
           import android.net.Uri;
 
           public class MainActivity extends BridgeActivity {
               private HashSet<String> adBlockSet = new HashSet<>();
-              private String adblockCss = "";
               private long lastBackPressTime = 0;
 
               @Override
               public void onCreate(Bundle savedInstanceState) {
                   super.onCreate(savedInstanceState);
                   
-                  WebView webView = this.bridge.getWebView();
-                  
-                  // 【核心防线】：通过物理 Padding 强制网页避开状态栏高度
+                  // 【核心修复】：物理级霸道防重叠！给 App 根节点强加 FitsSystemWindows
                   if (__FULLSCREEN__) {
                       getWindow().setFlags(1024, 1024);
                   } else {
-                      int statusBarHeight = 0;
-                      int resourceId = getResources().getIdentifier("status_bar_height", "dimen", "android");
-                      if (resourceId > 0) {
-                          statusBarHeight = getResources().getDimensionPixelSize(resourceId);
-                      }
-                      webView.setPadding(0, statusBarHeight, 0, 0);
+                      android.view.View content = getWindow().getDecorView().findViewById(android.R.id.content);
+                      if (content != null) { content.setFitsSystemWindows(true); }
+                      this.bridge.getWebView().setFitsSystemWindows(true);
                   }
 
                   new Thread(() -> {
@@ -234,15 +236,10 @@ jobs:
                           String line;
                           while ((line = reader.readLine()) != null) { adBlockSet.add(line.trim()); }
                           reader.close();
-                          
-                          InputStream is = getAssets().open("adblock.css");
-                          byte[] buffer = new byte[is.available()];
-                          is.read(buffer);
-                          is.close();
-                          adblockCss = new String(buffer, "UTF-8");
                       } catch (Exception e) {}
                   }).start();
 
+                  WebView webView = this.bridge.getWebView();
                   webView.addJavascriptInterface(new Object() {
                       @JavascriptInterface
                       public void exitApp() { finish(); }
@@ -252,6 +249,15 @@ jobs:
                       @Override
                       public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                           Uri uri = request.getUrl();
+                          String urlStr = uri.toString();
+                          
+                          // 【拦截木马请求】：当网页请求同源伪装链接时，直接吐出本地的去广告 CSS 流
+                          if (urlStr.endsWith("/reality_internal_adblock.css") || urlStr.endsWith("/reality_internal_adblock.css?v=1")) {
+                              try {
+                                  return new WebResourceResponse("text/css", "UTF-8", getAssets().open("adblock.css"));
+                              } catch (Exception e) {}
+                          }
+
                           if (uri != null && uri.getHost() != null) {
                               String host = uri.getHost();
                               String[] parts = host.split("\\\\.");
@@ -271,19 +277,6 @@ jobs:
                       public void onPageFinished(WebView view, String url) {
                           super.onPageFinished(view, url);
                           view.evaluateJavascript(new String(Base64.decode("__B64_JS__", Base64.DEFAULT)), null);
-                          
-                          // 【核心杀招】：绕过 CSP，将 CSS 隐形规则强行注入网页内核
-                          if (!adblockCss.isEmpty()) {
-                              String encodedCss = Base64.encodeToString(adblockCss.getBytes(), Base64.NO_WRAP);
-                              String injectCssJs = "javascript:(function() {" +
-                                  "var parent = document.getElementsByTagName('head').item(0) || document.documentElement;" +
-                                  "var style = document.createElement('style');" +
-                                  "style.type = 'text/css';" +
-                                  "style.innerHTML = decodeURIComponent(escape(window.atob('" + encodedCss + "')));" +
-                                  "parent.appendChild(style);" +
-                                  "})()";
-                              view.evaluateJavascript(injectCssJs, null);
-                          }
                       }
                   });
               }
